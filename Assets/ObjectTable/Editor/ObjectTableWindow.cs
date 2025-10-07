@@ -4,6 +4,8 @@ using UnityEngine;
 using UnityEditor;
 using UnityEditor.IMGUI.Controls;
 using System.Linq;
+using System.IO;
+using Newtonsoft.Json;
 
 public class ObjectTable : EditorWindow
 {
@@ -193,14 +195,16 @@ public class ObjectTable : EditorWindow
                 {
                     ScriptableObject newObj = CreateInstance(_objectTypeInfos[_selectedIndex].type);
 
-                    string path = AssetDatabase.GenerateUniqueAssetPath("Assets" + _targetFolderForNewAsset + "/new" + _objectTypeNames[_selectedIndex] + ".asset");
+                    string path = AssetDatabase.GenerateUniqueAssetPath("Assets" + _targetFolderForNewAsset + "/new" + _objectTypeNames[_selectedIndex] + ".json");
 
-                    AssetDatabase.CreateAsset(newObj, path);
+                    string json = JsonConvert.SerializeObject(newObj, Formatting.Indented);
+                    File.WriteAllText(path, json);
+
                     AssetDatabase.Refresh();
 
-                    newObj = AssetDatabase.LoadAssetAtPath<ScriptableObject>(path);
+                    newObj.name = Path.GetFileNameWithoutExtension(path);
 
-                    _databaseDisplay.AddElement(newObj);
+                    _databaseDisplay.AddElement(newObj, path);
                 }
 
                 controlRect.x += controlRect.width + 12;
@@ -303,10 +307,10 @@ public class DatabaseDisplayer : TreeView
         return id;
     }
 
-    public void AddElement(ScriptableObject newObject)
+    public void AddElement(ScriptableObject newObject, string path)
     {
         var rows = GetRows();
-        var newItem = DatabaseViewerItem.CreateFromUnityObject(newObject, this);
+        var newItem = DatabaseViewerItem.CreateFromUnityObject(newObject, path, this);
 
         rootItem.AddChild(newItem);
         rows.Add(newItem);
@@ -320,6 +324,9 @@ public class DatabaseDisplayer : TreeView
     {
         if(Event.current.type == EventType.KeyUp && Event.current.keyCode == KeyCode.Delete)
         {
+            if (!_objectType.isScriptableObject)
+                return;
+
             var list = GetSelection();
             if (EditorUtility.DisplayDialog("Confirm", "Confirm the suppression of the " + list.Count + " elected element?\nThis can't be undone.", "Yes", "No"))
             {
@@ -328,14 +335,12 @@ public class DatabaseDisplayer : TreeView
                 {
                     DatabaseViewerItem itm = FindItem(idx, rootItem) as DatabaseViewerItem;
                     rows.Remove(itm);
-
-                    AssetDatabase.DeleteAsset(AssetDatabase.GetAssetPath(itm.obj.targetObject));
+                    AssetDatabase.DeleteAsset(itm.assetPath);
                 }
 
                 AssetDatabase.Refresh();
-                Reload();
+                Repaint();
             }
-
         }
         else
             base.KeyEvent();
@@ -372,23 +377,32 @@ public class DatabaseDisplayer : TreeView
             int idx = column;
 
             if (idx == 0)
-            {//we handle the name a bit differently, as any change in the name need to be reflected in the name of the asset. So rename the asset if the name is changed
-
-                string originalValue;
-                if (_objectType.isScriptableObject)
-                    originalValue = item.properties[idx].stringValue;
-                else
-                    originalValue = item.obj.targetObject.name;
-
+            {
+                string originalValue = item.obj.targetObject.name;
                 string name = EditorGUI.DelayedTextField(r, originalValue);
 
                 if (name != originalValue)
                 {
-                    string oldPath = AssetDatabase.GetAssetPath(item.obj.targetObject);
+                    if (_objectType.isScriptableObject)
+                    {
+                        string oldPath = item.assetPath;
+                        string newNameWithoutExtension = Path.GetFileNameWithoutExtension(name);
+                        string error = AssetDatabase.RenameAsset(oldPath, newNameWithoutExtension);
 
-                    string error = AssetDatabase.RenameAsset(oldPath, System.IO.Path.GetFileNameWithoutExtension(name));
-                    if (error != "")
-                        Debug.LogError(error);
+                        if (error != "")
+                        {
+                            Debug.LogError(error);
+                        }
+                        else
+                        {
+                            item.assetPath = Path.Combine(Path.GetDirectoryName(oldPath), newNameWithoutExtension + ".json").Replace("\\", "/");
+                            item.obj.targetObject.name = newNameWithoutExtension;
+                        }
+                    }
+                    else
+                    {
+                        item.obj.targetObject.name = name;
+                    }
                 }
             }
             else
@@ -397,50 +411,61 @@ public class DatabaseDisplayer : TreeView
             }
         }
 
-        item.obj.ApplyModifiedProperties();
+        if (item.obj.ApplyModifiedProperties())
+        {
+            if (_objectType.isScriptableObject)
+            {
+                string json = JsonConvert.SerializeObject(item.obj.targetObject, Formatting.Indented);
+                File.WriteAllText(item.assetPath, json);
+            }
+        }
     }
 
     protected override TreeViewItem BuildRoot()
     {
-        Object[] objs = null;
-
-        //scriptable object type can be find fast through the find method, but monobheaviour need to be queried on EVERY PREFABS IN THE PROJECTS
-        //TODO : find a better way, this will probably become VERY SLOW on big project with thousand of prefabs
-        if(_objectType.isScriptableObject)
-        {
-            string[] assets = AssetDatabase.FindAssets("t:"+_objectType.type.ToString());
-            objs = new Object[assets.Length];
-
-            for (int i = 0; i < assets.Length; ++i)
-            {
-                objs[i] = AssetDatabase.LoadAssetAtPath(AssetDatabase.GUIDToAssetPath(assets[i]), _objectType.type);
-            }
-        }
-        else
-        {
-            string[] assets = AssetDatabase.FindAssets("t:" + _objectType.type.Name);
-            objs = new Object[assets.Length];
-
-            for (int i = 0; i < assets.Length; ++i)
-            {
-                objs[i] = AssetDatabase.LoadAssetAtPath(AssetDatabase.GUIDToAssetPath(assets[i]), _objectType.type);
-            }
-        }
-
         TreeViewItem root = new TreeViewItem();
-
         root.depth = -1;
         root.id = -1;
         root.parent = null;
         root.children = new List<TreeViewItem>();
 
-        if (objs != null)
+        if (_objectType.isScriptableObject)
         {
-            for (int i = 0; i < objs.Length; ++i)
+            string[] guids = AssetDatabase.FindAssets("t:TextAsset");
+            foreach (string guid in guids)
             {
-                var child = DatabaseViewerItem.CreateFromUnityObject(objs[i], this);
+                string assetPath = AssetDatabase.GUIDToAssetPath(guid);
+                if (!assetPath.EndsWith(".json"))
+                    continue;
 
-                root.AddChild(child);
+                try
+                {
+                    var obj = CreateInstance(_objectType.type);
+                    string json = File.ReadAllText(assetPath);
+                    JsonConvert.PopulateObject(json, obj);
+                    obj.name = Path.GetFileNameWithoutExtension(assetPath);
+
+                    var child = DatabaseViewerItem.CreateFromUnityObject(obj, assetPath, this);
+                    root.AddChild(child);
+                }
+                catch (System.Exception e)
+                {
+                    Debug.LogErrorFormat("Failed to deserialize {0}: {1}", assetPath, e.Message);
+                }
+            }
+        }
+        else
+        {
+            string[] guids = AssetDatabase.FindAssets("t:Prefab");
+            for (int i = 0; i < guids.Length; ++i)
+            {
+                string path = AssetDatabase.GUIDToAssetPath(guids[i]);
+                var obj = AssetDatabase.LoadAssetAtPath(path, _objectType.type);
+                if(obj != null)
+                {
+                    var child = DatabaseViewerItem.CreateFromUnityObject(obj, path, this);
+                    root.AddChild(child);
+                }
             }
         }
 
@@ -456,8 +481,9 @@ public class DatabaseViewerItem : TreeViewItem
     //but as we can't access property by index, need to build an array from them
     public SerializedObject obj;
     public SerializedProperty[] properties;
+    public string assetPath;
 
-    public static DatabaseViewerItem CreateFromUnityObject(UnityEngine.Object unityObject, DatabaseDisplayer treeView)
+    public static DatabaseViewerItem CreateFromUnityObject(UnityEngine.Object unityObject, string assetPath, DatabaseDisplayer treeView)
     {
         SerializedObject so = new SerializedObject(unityObject);
 
@@ -466,6 +492,7 @@ public class DatabaseViewerItem : TreeViewItem
         newItem.depth = 0;
         newItem.id = treeView.GetNewID();
         newItem.obj = so;
+        newItem.assetPath = assetPath;
 
         SerializedProperty prop = so.GetIterator();
         prop.Next(true);
