@@ -333,7 +333,7 @@ public class DatabaseDisplayer : TreeView
                 }
 
                 AssetDatabase.Refresh();
-                Repaint();
+                Reload();
             }
 
         }
@@ -418,14 +418,12 @@ public class DatabaseDisplayer : TreeView
         }
         else
         {
-            objs = new Object[0];
-            string[] assets = AssetDatabase.FindAssets("t:Prefab");
+            string[] assets = AssetDatabase.FindAssets("t:" + _objectType.type.Name);
+            objs = new Object[assets.Length];
 
             for (int i = 0; i < assets.Length; ++i)
             {
-                Object obj  = AssetDatabase.LoadAssetAtPath(AssetDatabase.GUIDToAssetPath(assets[i]), _objectType.type);
-                if (obj != null)
-                    ArrayUtility.Add(ref objs, obj);
+                objs[i] = AssetDatabase.LoadAssetAtPath(AssetDatabase.GUIDToAssetPath(assets[i]), _objectType.type);
             }
         }
 
